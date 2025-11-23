@@ -47,6 +47,12 @@ jobs:
             exit 1;
           fi
 
+      - name: Golangci-lint
+        uses: golangci/golangci-lint-action@e7fa5ac41e1cf5b7d48e45e42232ce7ada589601 # v9.1.0
+        with:
+          version: v2.6.2
+          only-new-issues: true
+
       - name: Run tests
         run: |
           go test ./... -v
