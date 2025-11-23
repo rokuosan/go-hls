@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
+
 	"strings"
 	"sync"
 	"time"
@@ -105,44 +107,100 @@ func NewClient(opts ...Option) *Client {
 	}
 	return c
 }
-func (c *Client) ParseM3U8(m3u8URL string) ([]string, *url.URL, error) {
-	resp, err := c.HTTP.Get(m3u8URL)
-	if err != nil {
-		return nil, nil, fmt.Errorf("HTTP request error: %w", err)
-	}
-	// do not defer Close here because we want to return close errors to caller
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("server error: status code %d", resp.StatusCode)
-	}
-
-	baseURL, err := url.Parse(m3u8URL)
-	if err != nil {
-		return nil, nil, fmt.Errorf("url parse error: %w", err)
-	}
-
+// ParseM3U8 parses the playlist from the provided io.Reader using the
+// reader-based parser. Callers pass an optional baseURL used to resolve
+// relative segment paths; the method returns the parsed segment list and the
+// same baseURL.
+func (c *Client) ParseM3U8(r io.Reader) ([]string, error) {
+	// Pure parser: return the listed .ts entries from the provided reader.
+	scanner := bufio.NewScanner(r)
 	var tsUrls []string
-	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if !strings.HasPrefix(line, "#") && strings.HasSuffix(strings.ToLower(line), ".ts") {
 			tsUrls = append(tsUrls, line)
 		}
 	}
-
 	if err := scanner.Err(); err != nil {
-		// attempt to close body and return the scanner error
-		if cerr := resp.Body.Close(); cerr != nil {
-			return nil, nil, fmt.Errorf("m3u8 scan error: %v; close error: %w", err, cerr)
+		return nil, fmt.Errorf("m3u8 parse error: %w", err)
+	}
+	return tsUrls, nil
+}
+
+// ParseM3U8FromURL opens the given playlist source which may be an HTTP/HTTPS
+// URL, a file:// URL, or a local filesystem path. It parses the playlist and
+// returns the segment list and a base URL for resolving relative segment
+// references.
+// ParseM3U8FromURL opens the given playlist source with the client's HTTP
+// settings and parses it. This is provided as a method so callers can use a
+// configured `Client` (custom http.Client, logger, etc.).
+func (c *Client) ParseM3U8FromURL(m3u8URL string) ([]string, *url.URL, error) {
+	// First try parsing as a URL. If parsing succeeds and a scheme is
+	// present, handle according to the scheme. Otherwise treat the input
+	// as a local filesystem path. The file handling for file:// and plain
+	// paths is unified via a single code path (label `fileOpen`).
+
+	var pathToOpen string
+	var baseURL *url.URL
+
+	u, err := url.Parse(m3u8URL)
+	if err == nil && u.Scheme != "" {
+		switch u.Scheme {
+		case "http", "https":
+			resp, err := c.HTTP.Get(m3u8URL)
+			if err != nil {
+				return nil, nil, fmt.Errorf("HTTP request error: %w", err)
+			}
+			if resp.StatusCode != http.StatusOK {
+				if cerr := resp.Body.Close(); cerr != nil {
+					return nil, nil, fmt.Errorf("server error: status code %d; close error: %w", resp.StatusCode, cerr)
+				}
+				return nil, nil, fmt.Errorf("server error: status code %d", resp.StatusCode)
+			}
+			defer resp.Body.Close()
+
+			parsedURL, err := url.Parse(m3u8URL)
+			if err != nil {
+				return nil, nil, fmt.Errorf("url parse error: %w", err)
+			}
+			ts, err := c.ParseM3U8(resp.Body)
+			return ts, parsedURL, err
+		case "file":
+			// Reject file:// with a non-local host (except localhost).
+			if u.Host != "" && u.Host != "localhost" {
+				return nil, nil, fmt.Errorf("unsupported file host: %s", u.Host)
+			}
+
+			p, err := url.PathUnescape(u.Path)
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid file path escape: %w", err)
+			}
+
+			pathToOpen = filepath.FromSlash(p)
+		default:
 		}
-		return nil, nil, fmt.Errorf("m3u8 scan error: %w", err)
 	}
 
-	if cerr := resp.Body.Close(); cerr != nil {
-		return nil, nil, fmt.Errorf("m3u8 close error: %w", cerr)
+	if pathToOpen == "" {
+		pathToOpen = filepath.Clean(m3u8URL)
 	}
 
-	return tsUrls, baseURL, nil
+	abs, err := filepath.Abs(pathToOpen)
+	if err != nil {
+		return nil, nil, fmt.Errorf("abs path error: %w", err)
+	}
+
+	f, err := os.Open(abs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open file error: %w", err)
+	}
+	defer f.Close()
+
+	dir := filepath.Dir(abs)
+	baseURL = &url.URL{Scheme: "file", Path: filepath.ToSlash(dir) + "/"}
+	ts, err := c.ParseM3U8(f)
+	return ts, baseURL, err
 }
 
 // DownloadSegments downloads all segments in parallel and returns the byte slices.
@@ -359,8 +417,15 @@ func applyJitter(d time.Duration, jitter float64) time.Duration {
 // Backwards-compatible package-level defaults
 var defaultClient = NewClient()
 
-// ParseM3U8 is a convenience wrapper using default client.
-func ParseM3U8(m3u8URL string) ([]string, *url.URL, error) { return defaultClient.ParseM3U8(m3u8URL) }
+// Note: package-level `ParseM3U8` now parses from an `io.Reader`.
+
+// ParseM3U8 parses an M3U8 playlist from an io.Reader and returns the listed
+// .ts segment paths in order. This package-level function is a thin wrapper
+// around the default client's parser and returns only the segment list.
+func ParseM3U8(r io.Reader) ([]string, error) {
+	ts, err := defaultClient.ParseM3U8(r)
+	return ts, err
+}
 
 // DownloadSegments is a convenience wrapper using default client.
 func DownloadSegments(ctx context.Context, tsUrls []string, baseURL *url.URL, concurrency int) ([][]byte, error) {

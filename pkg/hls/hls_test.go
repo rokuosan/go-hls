@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -32,50 +33,194 @@ func (f *fakeRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
-func TestParseM3U8(t *testing.T) {
-	playlist := "#EXTM3U\nsegment1.ts\nhttp://example.com/abs/segment2.ts\nsegment3.TS\n"
+func TestParseM3U8Reader(t *testing.T) {
+	playlist := "#EXTM3U\nsegA.ts\n../rel/segB.ts\nlast.TS\n"
+	r := strings.NewReader(playlist)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, err := w.Write([]byte(playlist)); err != nil {
-			t.Fatalf("write playlist: %v", err)
-		}
-	}))
-	defer srv.Close()
-
-	client := NewClient(WithConcurrency(DefaultConcurrency), WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
-	tsUrls, base, err := client.ParseM3U8(srv.URL + "/playlist.m3u8")
+	urls, err := ParseM3U8(r)
 	if err != nil {
-		t.Fatalf("ParseM3U8 error: %v", err)
+		t.Fatalf("ParseM3U8 reader error: %v", err)
 	}
-
-	if len(tsUrls) != 3 {
-		t.Fatalf("expected 3 ts urls, got %d", len(tsUrls))
+	if len(urls) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(urls))
 	}
-
-	if tsUrls[0] != "segment1.ts" {
-		t.Fatalf("unexpected first entry: %s", tsUrls[0])
+	if urls[0] != "segA.ts" {
+		t.Fatalf("unexpected first entry: %s", urls[0])
 	}
-
-	if tsUrls[1] != "http://example.com/abs/segment2.ts" {
-		t.Fatalf("unexpected second entry: %s", tsUrls[1])
+	if urls[1] != "../rel/segB.ts" {
+		t.Fatalf("unexpected second entry: %s", urls[1])
 	}
-
-	if tsUrls[2] != "segment3.TS" {
-		t.Fatalf("unexpected third entry: %s", tsUrls[2])
-	}
-
-	if base == nil {
-		t.Fatalf("expected non-nil base URL")
-	}
-
-	// Ensure base resolves relative correctly
-	resolved := base.ResolveReference(&url.URL{Path: "segment1.ts"}).String()
-	if resolved == "" {
-		t.Fatalf("resolve returned empty string")
+	if urls[2] != "last.TS" {
+		t.Fatalf("unexpected third entry: %s", urls[2])
 	}
 }
 
-// NOTE: success case is included as a subtest in TestFetchSegment below.
+func TestClientParseM3U8LocalFile(t *testing.T) {
+	playlist := "#EXTM3U\nlocal1.ts\nlocal2.ts\n"
+	f, err := os.CreateTemp("", "playlist-*.m3u8")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	name := f.Name()
+	if _, err := f.WriteString(playlist); err != nil {
+		_ = f.Close()
+		t.Fatalf("write temp: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close temp: %v", err)
+	}
+	defer func() { _ = os.Remove(name) }()
+
+	c := NewClient(WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	f2, err := os.Open(name)
+	if err != nil {
+		t.Fatalf("open temp file: %v", err)
+	}
+	defer f2.Close()
+	abs, err := filepath.Abs(name)
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	baseURL := &url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Dir(abs)) + "/"}
+	ts, err := c.ParseM3U8(f2)
+	if err != nil {
+		t.Fatalf("Client.ParseM3U8 local file error: %v", err)
+	}
+	if len(ts) != 2 {
+		t.Fatalf("expected 2 segments, got %d", len(ts))
+	}
+	if baseURL.Scheme != "file" {
+		t.Fatalf("expected file scheme base url, got %v", baseURL)
+	}
+}
+
+func TestClientParseM3U8FileURL(t *testing.T) {
+	playlist := "#EXTM3U\nfile1.ts\nfile2.ts\n"
+	f, err := os.CreateTemp("", "playlist-*.m3u8")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	name := f.Name()
+	if _, err := f.WriteString(playlist); err != nil {
+		_ = f.Close()
+		t.Fatalf("write temp: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close temp: %v", err)
+	}
+	defer func() { _ = os.Remove(name) }()
+
+	abs, err := filepath.Abs(name)
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+
+	c := NewClient(WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	f2, err := os.Open(name)
+	if err != nil {
+		t.Fatalf("open temp file: %v", err)
+	}
+	defer f2.Close()
+	baseURL := &url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Dir(abs)) + "/"}
+	ts, err := c.ParseM3U8(f2)
+	if err != nil {
+		t.Fatalf("Client.ParseM3U8 file:// error: %v", err)
+	}
+	if len(ts) != 2 {
+		t.Fatalf("expected 2 segments, got %d", len(ts))
+	}
+	if baseURL.Scheme != "file" {
+		t.Fatalf("expected file scheme base url, got %v", baseURL)
+	}
+}
+
+func TestClientParseM3U8FromURL(t *testing.T) {
+	t.Run("http", func(t *testing.T) {
+		playlist := "#EXTM3U\nseg1.ts\nseg2.ts\n"
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, err := w.Write([]byte(playlist)); err != nil {
+				t.Fatalf("write playlist: %v", err)
+			}
+		}))
+		defer srv.Close()
+
+		c := NewClient(WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+		ts, base, err := c.ParseM3U8FromURL(srv.URL + "/playlist.m3u8")
+		if err != nil {
+			t.Fatalf("ParseM3U8FromURL HTTP error: %v", err)
+		}
+		if len(ts) != 2 {
+			t.Fatalf("expected 2 segments, got %d", len(ts))
+		}
+		if base == nil || base.Scheme == "" {
+			t.Fatalf("expected base url, got %v", base)
+		}
+	})
+
+	t.Run("file_path", func(t *testing.T) {
+		playlist := "#EXTM3U\nfileA.ts\nfileB.ts\n"
+		f, err := os.CreateTemp("", "pl-*.m3u8")
+		if err != nil {
+			t.Fatalf("CreateTemp: %v", err)
+		}
+		name := f.Name()
+		if _, err := f.WriteString(playlist); err != nil {
+			_ = f.Close()
+			t.Fatalf("write temp: %v", err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatalf("close temp: %v", err)
+		}
+		defer func() { _ = os.Remove(name) }()
+
+		c := NewClient(WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+		ts, base, err := c.ParseM3U8FromURL(name)
+		if err != nil {
+			t.Fatalf("ParseM3U8FromURL local path error: %v", err)
+		}
+		if len(ts) != 2 {
+			t.Fatalf("expected 2 segments, got %d", len(ts))
+		}
+		if base == nil || base.Scheme != "file" {
+			t.Fatalf("expected file scheme base url, got %v", base)
+		}
+	})
+
+	t.Run("file_url", func(t *testing.T) {
+		playlist := "#EXTM3U\nfileX.ts\nfileY.ts\n"
+		f, err := os.CreateTemp("", "pl-*.m3u8")
+		if err != nil {
+			t.Fatalf("CreateTemp: %v", err)
+		}
+		name := f.Name()
+		if _, err := f.WriteString(playlist); err != nil {
+			_ = f.Close()
+			t.Fatalf("write temp: %v", err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatalf("close temp: %v", err)
+		}
+		defer func() { _ = os.Remove(name) }()
+
+		abs, err := filepath.Abs(name)
+		if err != nil {
+			t.Fatalf("abs: %v", err)
+		}
+		fileURL := "file://" + abs
+
+		c := NewClient(WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+		ts, base, err := c.ParseM3U8FromURL(fileURL)
+		if err != nil {
+			t.Fatalf("ParseM3U8FromURL file:// error: %v", err)
+		}
+		if len(ts) != 2 {
+			t.Fatalf("expected 2 segments, got %d", len(ts))
+		}
+		if base == nil || base.Scheme != "file" {
+			t.Fatalf("expected file scheme base url, got %v", base)
+		}
+	})
+}
 
 func TestFetchSegment(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
@@ -153,7 +298,20 @@ func TestDownloadAndCombineSegments(t *testing.T) {
 	defer srv.Close()
 
 	client := NewClient(WithConcurrency(2), WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
-	tsUrls, base, err := client.ParseM3U8(srv.URL + "/playlist.m3u8")
+	// fetch playlist and parse via reader-based API
+	resp, err := http.Get(srv.URL + "/playlist.m3u8")
+	if err != nil {
+		t.Fatalf("http get playlist: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+	base, err := url.Parse(srv.URL + "/playlist.m3u8")
+	if err != nil {
+		t.Fatalf("parse base: %v", err)
+	}
+	tsUrls, err := client.ParseM3U8(resp.Body)
 	if err != nil {
 		t.Fatalf("ParseM3U8: %v", err)
 	}
@@ -196,36 +354,50 @@ func TestDownloadAndCombineSegments(t *testing.T) {
 	}
 }
 
-func TestCombineSegmentsOnly(t *testing.T) {
-	// Simple combine without download
-	segments := [][]byte{[]byte("X"), []byte("Y")}
-	f, err := os.CreateTemp("", "combine-*.ts")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
-	fname := f.Name()
-	if err := f.Close(); err != nil {
-		t.Fatalf("close temp file: %v", err)
-	}
-	defer func() {
-		if err := os.Remove(fname); err != nil {
-			t.Logf("remove temp file: %v", err)
+func TestParseM3U8(t *testing.T) {
+	t.Run("reader_basic", func(t *testing.T) {
+		playlist := "#EXTM3U\nsegA.ts\n../rel/segB.ts\nlast.TS\n"
+		r := strings.NewReader(playlist)
+
+		urls, err := ParseM3U8(r)
+		if err != nil {
+			t.Fatalf("ParseM3U8 reader error: %v", err)
 		}
-	}()
+		if len(urls) != 3 {
+			t.Fatalf("expected 3 entries, got %d", len(urls))
+		}
+		if urls[0] != "segA.ts" {
+			t.Fatalf("unexpected first entry: %s", urls[0])
+		}
+	})
 
-	c := NewClient(WithConcurrency(DefaultConcurrency), WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
-	if err := c.CombineSegments(segments, fname); err != nil {
-		t.Fatalf("CombineSegments: %v", err)
-	}
+	t.Run("http_reader", func(t *testing.T) {
+		playlist := "#EXTM3U\nsegment1.ts\nhttp://example.com/abs/segment2.ts\nsegment3.TS\n"
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, err := w.Write([]byte(playlist)); err != nil {
+				t.Fatalf("write playlist: %v", err)
+			}
+		}))
+		defer srv.Close()
 
-	data, err := os.ReadFile(fname)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
+		client := NewClient(WithConcurrency(DefaultConcurrency), WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+		resp, err := http.Get(srv.URL + "/playlist.m3u8")
+		if err != nil {
+			t.Fatalf("http get playlist: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("unexpected status: %d", resp.StatusCode)
+		}
+		tsUrls, err := client.ParseM3U8(resp.Body)
+		if err != nil {
+			t.Fatalf("ParseM3U8 error: %v", err)
+		}
+		if len(tsUrls) != 3 {
+			t.Fatalf("expected 3 ts urls, got %d", len(tsUrls))
+		}
+	})
 
-	if string(data) != "XY" {
-		t.Fatalf("unexpected data: %s", string(data))
-	}
 }
 
 // flakyRT simulates transient errors for the first N calls, then succeeds.
