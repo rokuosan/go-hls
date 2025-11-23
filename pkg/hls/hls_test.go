@@ -148,7 +148,7 @@ func TestDownloadAndCombineSegments(t *testing.T) {
 		t.Fatalf("ParseM3U8: %v", err)
 	}
 
-	segments, err := client.DownloadSegments(context.Background(), tsUrls, base)
+	segments, err := client.DownloadSegments(context.Background(), tsUrls, base, nil)
 	if err != nil {
 		t.Fatalf("DownloadSegments error: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestDownloadSegmentsConcurrency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	segments, err := c.DownloadSegments(ctx, ts, base)
+	segments, err := c.DownloadSegments(ctx, ts, base, nil)
 	if err != nil {
 		t.Fatalf("DownloadSegments error: %v", err)
 	}

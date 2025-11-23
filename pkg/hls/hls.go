@@ -138,7 +138,9 @@ func (c *Client) ParseM3U8(m3u8URL string) ([]string, *url.URL, error) {
 }
 
 // DownloadSegments downloads all segments in parallel and returns the byte slices.
-func (c *Client) DownloadSegments(parentCtx context.Context, tsUrls []string, baseURL *url.URL) ([][]byte, error) {
+// If progress is non-nil, the function will send `1` on the channel for each
+// successfully completed segment. The channel is not closed by this function.
+func (c *Client) DownloadSegments(parentCtx context.Context, tsUrls []string, baseURL *url.URL, progress chan<- int) ([][]byte, error) {
 	segments := make([][]byte, len(tsUrls))
 	errs := make(chan error, len(tsUrls))
 
@@ -174,6 +176,12 @@ func (c *Client) DownloadSegments(parentCtx context.Context, tsUrls []string, ba
 			}
 
 			segments[index] = data
+			if progress != nil {
+				select {
+				case progress <- 1:
+				case <-ctx.Done():
+				}
+			}
 		}(i, relPath)
 	}
 
@@ -307,7 +315,7 @@ func ParseM3U8(m3u8URL string) ([]string, *url.URL, error) { return defaultClien
 func DownloadSegments(ctx context.Context, tsUrls []string, baseURL *url.URL, concurrency int) ([][]byte, error) {
 	// ignore provided concurrency; keep compatibility by creating a temp client
 	c := NewClient(WithConcurrency(concurrency))
-	return c.DownloadSegments(ctx, tsUrls, baseURL)
+	return c.DownloadSegments(ctx, tsUrls, baseURL, nil)
 }
 
 // CombineSegments wrapper
