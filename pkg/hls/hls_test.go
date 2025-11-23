@@ -36,7 +36,9 @@ func TestParseM3U8(t *testing.T) {
 	playlist := "#EXTM3U\nsegment1.ts\nhttp://example.com/abs/segment2.ts\nsegment3.TS\n"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(playlist))
+		if _, err := w.Write([]byte(playlist)); err != nil {
+			t.Fatalf("write playlist: %v", err)
+		}
 	}))
 	defer srv.Close()
 
@@ -79,7 +81,9 @@ func TestFetchSegment(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("HELLO"))
+			if _, err := w.Write([]byte("HELLO")); err != nil {
+				t.Fatalf("write hello: %v", err)
+			}
 		}))
 		defer srv.Close()
 
@@ -131,11 +135,17 @@ func TestDownloadAndCombineSegments(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/playlist.m3u8":
-			w.Write([]byte("a.ts\nb.ts\n"))
+			if _, err := w.Write([]byte("a.ts\nb.ts\n")); err != nil {
+				t.Fatalf("write playlist body: %v", err)
+			}
 		case "/a.ts":
-			w.Write([]byte("AAA"))
+			if _, err := w.Write([]byte("AAA")); err != nil {
+				t.Fatalf("write a.ts: %v", err)
+			}
 		case "/b.ts":
-			w.Write([]byte("BBB"))
+			if _, err := w.Write([]byte("BBB")); err != nil {
+				t.Fatalf("write b.ts: %v", err)
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -163,8 +173,14 @@ func TestDownloadAndCombineSegments(t *testing.T) {
 		t.Fatalf("CreateTemp: %v", err)
 	}
 	fname := f.Name()
-	f.Close()
-	defer os.Remove(fname)
+	if err := f.Close(); err != nil {
+		t.Fatalf("close temp file: %v", err)
+	}
+	defer func() {
+		if err := os.Remove(fname); err != nil {
+			t.Logf("remove temp file: %v", err)
+		}
+	}()
 
 	if err := client.CombineSegments(segments, fname); err != nil {
 		t.Fatalf("CombineSegments error: %v", err)
@@ -188,8 +204,14 @@ func TestCombineSegmentsOnly(t *testing.T) {
 		t.Fatalf("CreateTemp: %v", err)
 	}
 	fname := f.Name()
-	f.Close()
-	defer os.Remove(fname)
+	if err := f.Close(); err != nil {
+		t.Fatalf("close temp file: %v", err)
+	}
+	defer func() {
+		if err := os.Remove(fname); err != nil {
+			t.Logf("remove temp file: %v", err)
+		}
+	}()
 
 	c := NewClient(WithConcurrency(DefaultConcurrency), WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
 	if err := c.CombineSegments(segments, fname); err != nil {

@@ -110,7 +110,7 @@ func (c *Client) ParseM3U8(m3u8URL string) ([]string, *url.URL, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("HTTP request error: %w", err)
 	}
-	defer resp.Body.Close()
+	// do not defer Close here because we want to return close errors to caller
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, nil, fmt.Errorf("server error: status code %d", resp.StatusCode)
@@ -131,7 +131,15 @@ func (c *Client) ParseM3U8(m3u8URL string) ([]string, *url.URL, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
+		// attempt to close body and return the scanner error
+		if cerr := resp.Body.Close(); cerr != nil {
+			return nil, nil, fmt.Errorf("m3u8 scan error: %v; close error: %w", err, cerr)
+		}
 		return nil, nil, fmt.Errorf("m3u8 scan error: %w", err)
+	}
+
+	if cerr := resp.Body.Close(); cerr != nil {
+		return nil, nil, fmt.Errorf("m3u8 close error: %w", cerr)
 	}
 
 	return tsUrls, baseURL, nil
@@ -235,8 +243,37 @@ func (c *Client) fetchSegment(ctx context.Context, fullURL string) ([]byte, erro
 
 		// handle non-200
 		if resp.StatusCode != http.StatusOK {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
+			if _, cerr := io.Copy(io.Discard, resp.Body); cerr != nil {
+				// if drain fails and it's a 5xx we can retry, otherwise return the drain error
+				if resp.StatusCode >= 500 && resp.StatusCode < 600 && attempt < attempts-1 {
+					if c != nil && c.Logger != nil {
+						c.Logger.Warn("failed to drain response body, will retry", "err", cerr)
+					}
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(applyJitter(c.Backoff*(1<<attempt), c.Jitter)):
+					}
+					continue
+				}
+				return nil, fmt.Errorf("drain error: %w", cerr)
+			}
+
+			if cerr := resp.Body.Close(); cerr != nil {
+				if resp.StatusCode >= 500 && resp.StatusCode < 600 && attempt < attempts-1 {
+					if c != nil && c.Logger != nil {
+						c.Logger.Warn("failed to close response body, will retry", "err", cerr)
+					}
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(applyJitter(c.Backoff*(1<<attempt), c.Jitter)):
+					}
+					continue
+				}
+				return nil, fmt.Errorf("close error: %w", cerr)
+			}
+
 			if resp.StatusCode >= 500 && resp.StatusCode < 600 && attempt < attempts-1 {
 				select {
 				case <-ctx.Done():
@@ -245,11 +282,19 @@ func (c *Client) fetchSegment(ctx context.Context, fullURL string) ([]byte, erro
 				}
 				continue
 			}
+
 			return nil, fmt.Errorf("server error: status code %d", resp.StatusCode)
 		}
 
 		data, rerr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		if cerr := resp.Body.Close(); cerr != nil {
+			if rerr != nil {
+				rerr = fmt.Errorf("%v; close error: %w", rerr, cerr)
+			} else {
+				// non-nil close error and no read error
+				rerr = fmt.Errorf("close error: %w", cerr)
+			}
+		}
 		if rerr != nil {
 			if attempt == attempts-1 {
 				return nil, fmt.Errorf("read error: %w", rerr)
@@ -274,7 +319,13 @@ func (c *Client) CombineSegments(segments [][]byte, outputFileName string) error
 	if err != nil {
 		return fmt.Errorf("output file create error: %w", err)
 	}
-	defer outFile.Close()
+	defer func() {
+		if cerr := outFile.Close(); cerr != nil {
+			if c != nil && c.Logger != nil {
+				c.Logger.Warn("failed to close output file", "err", cerr)
+			}
+		}
+	}()
 
 	c.Logger.Info("combining segments", "count", len(segments), "out", outputFileName)
 
