@@ -91,7 +91,7 @@ func main() {
 	}()
 
 	logger.Info("parsing playlist", "url", *playlist)
-	tsUrls, base, err := client.ParseM3U8(*playlist)
+	tsUrls, base, err := client.ParseM3U8FromURL(*playlist)
 	if err != nil {
 		logger.Error("failed to parse playlist", "err", err)
 		os.Exit(1)
