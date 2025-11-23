@@ -7,10 +7,18 @@ tasks:
     desc: Run Go tests with verbose output
     silent: false
 
-  lint:
+  golangci-lint:
     cmds:
       - |
         docker run --rm -t -v $(pwd):/app -w /app \
-          golangci/golangci-lint:v2.6.2 golangci-lint run
+          golangci/golangci-lint:v2.6.2 golangci-lint {{default "help" .CLI_ARGS }}
     desc: Run golangci-lint
+    silent: true
+
+  lint:
+    cmds:
+      - task: golangci-lint
+        vars:
+          CLI_ARGS: "run"
+    desc: Run golangci-lint lint
     silent: true
