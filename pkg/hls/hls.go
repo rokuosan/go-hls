@@ -158,7 +158,13 @@ func (c *Client) ParseM3U8FromURL(m3u8URL string) ([]string, *url.URL, error) {
 				}
 				return nil, nil, fmt.Errorf("server error: status code %d", resp.StatusCode)
 			}
-			defer resp.Body.Close()
+			defer func() {
+				if cerr := resp.Body.Close(); cerr != nil {
+					if c != nil && c.Logger != nil {
+						c.Logger.Warn("failed to close response body", "err", cerr)
+					}
+				}
+			}()
 
 			parsedURL, err := url.Parse(m3u8URL)
 			if err != nil {
@@ -195,7 +201,13 @@ func (c *Client) ParseM3U8FromURL(m3u8URL string) ([]string, *url.URL, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("open file error: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			if c != nil && c.Logger != nil {
+				c.Logger.Warn("failed to close file", "path", abs, "err", cerr)
+			}
+		}
+	}()
 
 	dir := filepath.Dir(abs)
 	baseURL = &url.URL{Scheme: "file", Path: filepath.ToSlash(dir) + "/"}

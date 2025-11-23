@@ -76,7 +76,11 @@ func TestClientParseM3U8LocalFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open temp file: %v", err)
 	}
-	defer f2.Close()
+	defer func() {
+		if cerr := f2.Close(); cerr != nil {
+			t.Fatalf("close temp file: %v", cerr)
+		}
+	}()
 	abs, err := filepath.Abs(name)
 	if err != nil {
 		t.Fatalf("abs: %v", err)
@@ -120,7 +124,11 @@ func TestClientParseM3U8FileURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open temp file: %v", err)
 	}
-	defer f2.Close()
+	defer func() {
+		if cerr := f2.Close(); cerr != nil {
+			t.Fatalf("close temp file: %v", cerr)
+		}
+	}()
 	baseURL := &url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Dir(abs)) + "/"}
 	ts, err := c.ParseM3U8(f2)
 	if err != nil {
@@ -303,7 +311,11 @@ func TestDownloadAndCombineSegments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("http get playlist: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			t.Fatalf("close resp body: %v", cerr)
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected status: %d", resp.StatusCode)
 	}
@@ -385,7 +397,11 @@ func TestParseM3U8(t *testing.T) {
 		if err != nil {
 			t.Fatalf("http get playlist: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() {
+			if cerr := resp.Body.Close(); cerr != nil {
+				t.Fatalf("close resp body: %v", cerr)
+			}
+		}()
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("unexpected status: %d", resp.StatusCode)
 		}
